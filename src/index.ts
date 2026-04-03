@@ -125,27 +125,25 @@ export class LightClient {
     
     init.headers = headers;
 
-    // 3. Configure AbortController for Timeout
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const abortController = new AbortController();
-    
-    if (timeoutMs) {
-      timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
-      
-      // If a signal was passed in the config, tie it to our abort controller to merge both signals
-      if (init.signal) {
-        init.signal.addEventListener('abort', () => abortController.abort());
-      }
-      init.signal = abortController.signal;
-    }
-
     let attempt = 0;
     const maxAttempts = retries + 1;
 
     // Execution loop for requests with retries
     while (attempt < maxAttempts) {
+      // Configure AbortController per request attempt
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const abortController = new AbortController();
+      
+      const onParentAbort = () => abortController.abort();
+      if (init.signal) {
+        if (init.signal.aborted) {
+          return [null, new Error('Request was aborted')];
+        }
+        init.signal.addEventListener('abort', onParentAbort);
+      }
+
       try {
-        let finalInit: RequestInit = { ...init } as RequestInit;
+        let finalInit: RequestInit = { ...init, signal: abortController.signal } as RequestInit;
 
         // Execute request middlewares
         const requestMws = this.config.middlewares?.request || [];
@@ -154,7 +152,22 @@ export class LightClient {
         }
 
         // The actual fetch call
-        let response = await fetch(fullUrl, finalInit);
+        const fetchPromise = fetch(fullUrl, finalInit);
+        let response: Response;
+
+        if (timeoutMs) {
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(() => {
+              abortController.abort();
+              reject(new Error('TimeoutError'));
+            }, timeoutMs);
+          });
+          // React Native fallback for timeouts: Promise.race guarantees rejection
+          // even if the internal fetch doesn't support generic AbortController timeouts
+          response = await Promise.race([fetchPromise, timeoutPromise]);
+        } else {
+          response = await fetchPromise;
+        }
 
         // Execute response middlewares
         const responseMws = this.config.middlewares?.response || [];
@@ -205,7 +218,7 @@ export class LightClient {
         attempt++;
         
         // Avoid retrying if the request was aborted manually or via timeout
-        if (error instanceof Error && error.name === 'AbortError') {
+        if (error instanceof Error && (error.name === 'AbortError' || error.message === 'TimeoutError')) {
            return [null, new Error(`Request timed out after ${timeoutMs}ms or was aborted`)];
         }
         
@@ -219,9 +232,13 @@ export class LightClient {
         const delay = typeof retryDelay === 'function' ? retryDelay(attempt) : retryDelay;
         await sleep(delay);
       } finally {
-        // Cleanup timeout timeoutId
-        if (timeoutId && (attempt >= maxAttempts || timeoutMs)) {
+        // Cleanup timeout and event listeners on every attempt to avoid memory leaks
+        if (timeoutId) {
           clearTimeout(timeoutId);
+        }
+        // Safely remove the abort listener if signal was provided
+        if (init.signal && typeof init.signal.removeEventListener === 'function') {
+          init.signal.removeEventListener('abort', onParentAbort);
         }
       }
     }
