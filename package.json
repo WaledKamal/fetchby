@@ -1,6 +1,6 @@
 {
   "name": "@kamavinga/fetchby",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A modern, ultra-lightweight Fetch API wrapper with Zod schema validation, automatic retries, middlewares, and a result-tuple pattern.",
   "type": "module",
   "main": "./dist/index.cjs",
